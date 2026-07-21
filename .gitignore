@@ -1,0 +1,33 @@
+# Python缓存
+__pycache__/
+*.py[cod]
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE配置
+.idea/
+.vscode/
+
+# 训练结果
+outputs/
+outputs_*/
+runs/
+logs/
+*.log
+
+# 模型与检查点
+checkpoints/
+models/
+*.pt
+*.pth
+*.ckpt
+
+# 临时文件
+.ipynb_checkpoints/
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
