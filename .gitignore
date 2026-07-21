@@ -12,15 +12,15 @@ env/
 .vscode/
 
 # 训练结果
-outputs/
-outputs_*/
+outputs_debug
+outputs_fixed_start_test
+outputs_test
 runs/
 logs/
 *.log
 
 # 模型与检查点
 checkpoints/
-models/
 *.pt
 *.pth
 *.ckpt
