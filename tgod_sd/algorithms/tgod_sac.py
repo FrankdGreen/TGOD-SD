@@ -47,6 +47,10 @@ class TGODSACAgent(SACAgent):
         self.expert_tensor = torch.as_tensor(self.expert_demo, device=self.device)
         self.expert_mean = self.expert_demo.mean(axis=0, keepdims=True)
         self.expert_std = self.expert_demo.std(axis=0, keepdims=True) + 1e-6
+        self.expert_qpos = np.asarray(
+            np.load(tgod_cfg.expert_qpos_path),
+            dtype=np.float32,
+        )
 
     def sample_z(self, batch: int = 1) -> np.ndarray:
         return np.random.randn(batch, self.z_dim).astype(np.float32)
@@ -181,4 +185,45 @@ class TGODSACAgent(SACAgent):
 
         return float(
             np.clip(reward, -20.0, 5.0)
+        )
+
+    def compute_joint_tracking_reward(
+            self,
+            qpos: np.ndarray,
+            action: np.ndarray,
+            step: int,
+            expert_qpos: np.ndarray,
+    ) -> float:
+        index = min(
+            int(step),
+            len(expert_qpos) - 1,
+        )
+
+        q_target = expert_qpos[index]
+
+        raw_error = qpos - q_target
+
+        # 把关节角误差限制到 [-pi, pi]
+        q_error = np.arctan2(
+            np.sin(raw_error),
+            np.cos(raw_error),
+        )
+
+        normalized_error = q_error / np.pi
+
+        tracking_cost = float(
+            np.mean(normalized_error ** 2)
+        )
+
+        action_cost = float(
+            np.mean(action ** 2)
+        )
+
+        reward = (
+                -10.0 * tracking_cost
+                - 0.001 * action_cost
+        )
+
+        return float(
+            np.clip(reward, -20.0, 1.0)
         )

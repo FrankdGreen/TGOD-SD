@@ -43,8 +43,9 @@ class TGODConfig:
     reward_clip: float = 20.0
     # 工程稳定项：不是论文 TGOD 核心公式。调试时可以给 0.01~0.05。
     anchor_reward_weight: float = 0.0
-    reward_mode: str = "tracking"
-
+    # reward_mode: str = "tracking"
+    reward_mode: str = "joint_tracking"
+    expert_qpos_path: str = "data/expert_qpos.npy"
 
 @dataclass
 class TrainConfig:

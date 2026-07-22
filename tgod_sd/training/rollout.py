@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from tgod_sd.algorithms.replay_buffer import ReplayBuffer
@@ -49,11 +51,26 @@ def rollout_episode(
 
         # reward = agent.compute_pseudo_reward(obs, z)
         next_obs, _, done, info = env.step(action)
-        reward = agent.compute_tracking_reward(
-            tcp=info["tcp"],
-            step=env.t,
+        # reward = agent.compute_joint_tracking_reward(
+        #     tcp=info["tcp"],
+        #     step=env.t,
+        #     action=action,
+        # )
+        reward = agent.compute_joint_tracking_reward(
+            qpos=info["qpos"],
             action=action,
+            step=env.t,
+            expert_qpos=agent.expert_qpos,
         )
+        if env.t <= 5:
+            print(
+                "[INDEX]",
+                "env.t =", env.t,
+                "target index =", min(
+                    env.t,
+                    len(agent.expert_qpos) - 1,
+                ),
+            )
 
         if replay is not None:
             replay.add(obs, action, z, reward, next_obs, done)
