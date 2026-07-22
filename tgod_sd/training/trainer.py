@@ -68,7 +68,7 @@ class TGODSDTrainer:
                     replay=self.replay,
                     start_steps_left=start_steps_left,
                     deterministic=False,
-                    fixed_z=True,
+                    fixed_z=self.train_cfg.fixed_z,
                 )
                 start_steps_left = int(episode["start_steps_left"])
 
@@ -123,7 +123,7 @@ class TGODSDTrainer:
                 self.agent,
                 replay=None,
                 deterministic=self.match_cfg.deterministic,
-                fixed_z=True,
+                fixed_z=self.train_cfg.fixed_z,
             )
             tcp, qpos = self._aligned_trajectory(
                 episode

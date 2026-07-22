@@ -66,6 +66,7 @@ class TrainConfig:
     log_interval: int = 10
     save_interval: int = 100
     device: str = "auto"
+    fixed_z: bool = False
 
 
 @dataclass

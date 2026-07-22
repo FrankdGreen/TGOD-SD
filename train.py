@@ -48,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=2500,
         help="经验池达到该数量后才开始更新网络。",
     )
+    p.add_argument(
+        "--fixed_z",
+        action="store_true",
+        help="所有episode固定使用零向量z，用于纯轨迹跟踪基准。",
+    )
 
     # SAC
     p.add_argument("--hidden_dim", type=int, default=256)
@@ -117,6 +122,7 @@ def main() -> None:
         save_interval=args.save_interval,
         device=args.device,
         learning_starts=args.learning_starts,
+        fixed_z=args.fixed_z,
     )
     match_cfg = MatchConfig(
         n_candidates=args.n_candidates,
