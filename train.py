@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="所有episode固定使用零向量z，用于纯轨迹跟踪基准。",
     )
+    p.add_argument(
+        "--reward_mode",
+        type=str,
+        default="joint tracking",
+    )
 
     # SAC
     p.add_argument("--hidden_dim", type=int, default=256)
