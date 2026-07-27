@@ -10,6 +10,7 @@ from tgod_sd.algorithms.replay_buffer import ReplayBuffer
 from tgod_sd.algorithms.sac import SACAgent
 from tgod_sd.configs import SACConfig, TGODConfig
 from tgod_sd.models.networks import MINENet
+from tgod_sd.utils import rotation_error_rotvec
 
 
 class TGODSACAgent(SACAgent):
@@ -23,14 +24,14 @@ class TGODSACAgent(SACAgent):
     """
 
     def __init__(
-        self,
-        obs_dim: int,
-        action_dim: int,
-        expert_demo: np.ndarray,
-        tcp_slice: slice,
-        sac_cfg: SACConfig,
-        tgod_cfg: TGODConfig,
-        device: str = "auto",
+            self,
+            obs_dim: int,
+            action_dim: int,
+            expert_demo: np.ndarray,
+            tcp_slice: slice,
+            sac_cfg: SACConfig,
+            tgod_cfg: TGODConfig,
+            device: str = "auto",
     ):
         super().__init__(obs_dim, action_dim, tgod_cfg.z_dim, sac_cfg, device=device)
         self.tgod_cfg = tgod_cfg
@@ -47,15 +48,15 @@ class TGODSACAgent(SACAgent):
         self.expert_tensor = torch.as_tensor(self.expert_demo, device=self.device)
         self.expert_mean = self.expert_demo.mean(axis=0, keepdims=True)
         self.expert_std = self.expert_demo.std(axis=0, keepdims=True) + 1e-6
-        self.expert_qpos = np.asarray(
-            np.load(tgod_cfg.expert_qpos_path),
-            dtype=np.float32,
-        )
 
     def sample_z(self, batch: int = 1) -> np.ndarray:
         return np.random.randn(batch, self.z_dim).astype(np.float32)
 
-    def update(self, replay: ReplayBuffer, batch_size: int) -> dict[str, float]:
+    def update(
+            self,
+            replay: ReplayBuffer,
+            batch_size: int,
+    ) -> dict[str, float]:
         if replay.size < batch_size:
             return {
                 "critic_loss": 0.0,
@@ -63,12 +64,20 @@ class TGODSACAgent(SACAgent):
                 "mine_loss": 0.0,
                 "mi_zs": 0.0,
                 "mi_zd": 0.0,
-                "alpha": float(self.alpha.detach().cpu()),
+                "alpha": float(
+                    self.alpha.detach().cpu()
+                ),
                 "entropy": 0.0,
             }
 
-        batch = replay.sample(batch_size, self.device)
-        if self.tgod_cfg.reward_mode == "tracking":
+        batch = replay.sample(
+            batch_size,
+            self.device,
+        )
+
+        mode = self.tgod_cfg.reward_mode
+
+        if mode == "tcp_tracking":
             sac_stats = self.update_sac(batch)
 
             return {
@@ -77,9 +86,25 @@ class TGODSACAgent(SACAgent):
                 "mi_zs": 0.0,
                 "mi_zd": 0.0,
             }
-        mine_stats = self._update_mine(batch["obs"], batch["z"])
-        sac_stats = self.update_sac(batch)
-        return {**sac_stats, **mine_stats}
+
+        if mode == "tgod":
+            mine_stats = self._update_mine(
+                batch["obs"],
+                batch["z"],
+            )
+
+            sac_stats = self.update_sac(
+                batch
+            )
+
+            return {
+                **sac_stats,
+                **mine_stats,
+            }
+
+        raise ValueError(
+            f"未知reward_mode：{mode}"
+        )
 
     def _update_mine(self, obs: torch.Tensor, z: torch.Tensor) -> dict[str, float]:
         batch_size = obs.shape[0]
@@ -226,4 +251,83 @@ class TGODSACAgent(SACAgent):
 
         return float(
             np.clip(reward, -20.0, 1.0)
+        )
+
+    def compute_tcp_tracking_reward(
+            self,
+            tcp: np.ndarray,
+            step: int,
+            action: np.ndarray,
+    ) -> float:
+        index = min(
+            max(int(step), 0),
+            len(self.expert_demo) - 1,
+        )
+
+        target = self.expert_demo[index]
+
+        position_error = (
+                tcp[:3]
+                - target[:3]
+        )
+
+        orientation_error = (
+            rotation_error_rotvec(
+                current_rotvec=tcp[3:6],
+                target_rotvec=target[3:6],
+            )
+        )
+
+        position_scale = (
+            self.tgod_cfg.position_error_scale
+        )
+
+        orientation_scale = (
+            self.tgod_cfg.orientation_error_scale
+        )
+
+        position_cost = float(
+            np.sum(
+                (
+                        position_error
+                        / position_scale
+                ) ** 2
+            )
+        )
+
+        orientation_cost = float(
+            np.sum(
+                (
+                        orientation_error
+                        / orientation_scale
+                ) ** 2
+            )
+        )
+
+        action_cost = float(
+            np.mean(
+                np.asarray(
+                    action,
+                    dtype=np.float32,
+                ) ** 2
+            )
+        )
+
+        reward = (
+                -self.tgod_cfg.position_reward_weight
+                * position_cost
+
+                - self.tgod_cfg.orientation_reward_weight
+                * orientation_cost
+
+                - self.tgod_cfg.action_penalty_weight
+                * action_cost
+        )
+
+        return float(
+            np.clip(
+                reward,
+                -self.tgod_cfg.reward_clip,
+                5.0,
+            )
         )

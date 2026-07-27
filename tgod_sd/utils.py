@@ -81,3 +81,76 @@ def to_device(device: str) -> torch.device:
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
+
+
+def skew(
+        vector: np.ndarray,
+) -> np.ndarray:
+    x, y, z = np.asarray(
+        vector,
+        dtype=np.float64,
+    )
+
+    return np.array(
+        [
+            [0.0, -z, y],
+            [z, 0.0, -x],
+            [-y, x, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def rotvec_to_rotmat(
+        rotvec: np.ndarray,
+) -> np.ndarray:
+    rotvec = np.asarray(
+        rotvec,
+        dtype=np.float64,
+    ).reshape(3)
+
+    theta = float(
+        np.linalg.norm(rotvec)
+    )
+
+    if theta < 1e-10:
+        return (
+                np.eye(3)
+                + skew(rotvec)
+        )
+
+    axis = rotvec / theta
+    axis_skew = skew(axis)
+
+    return (
+            np.eye(3)
+            + np.sin(theta) * axis_skew
+            + (
+                    1.0 - np.cos(theta)
+            )
+            * axis_skew
+            @ axis_skew
+    )
+
+
+def rotation_error_rotvec(
+        current_rotvec: np.ndarray,
+        target_rotvec: np.ndarray,
+) -> np.ndarray:
+    current_rotation = rotvec_to_rotmat(
+        current_rotvec
+    )
+
+    target_rotation = rotvec_to_rotmat(
+        target_rotvec
+    )
+
+    # 世界坐标系中的目标相对当前旋转
+    error_rotation = (
+            target_rotation
+            @ current_rotation.T
+    )
+
+    return rotmat_to_rotvec(
+        error_rotation
+    )

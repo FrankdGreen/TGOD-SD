@@ -39,6 +39,10 @@ def rollout_episode(
     qpos_list: list[np.ndarray] = []
     action_list: list[np.ndarray] = []
     reward_list: list[float] = []
+    cartesian_delta_list: list[np.ndarray] = []
+    joint_delta_list: list[np.ndarray] = []
+    q_target_list: list[np.ndarray] = []
+    jacobian_condition_list: list[float] = []
 
     done = False
     steps = 0
@@ -49,29 +53,32 @@ def rollout_episode(
         else:
             action = agent.act(obs, z, deterministic=deterministic).astype(np.float32)
 
-        # reward = agent.compute_pseudo_reward(obs, z)
-        next_obs, _, done, info = env.step(action)
-        # reward = agent.compute_joint_tracking_reward(
-        #     tcp=info["tcp"],
-        #     step=env.t,
-        #     action=action,
-        # )
-        reward = agent.compute_joint_tracking_reward(
-            qpos=info["qpos"],
-            action=action,
-            step=env.t,
-            expert_qpos=agent.expert_qpos,
+        next_obs, _, done, info = env.step(
+            action
         )
-        if env.t <= 5:
-            print(
-                "[INDEX]",
-                "env.t =", env.t,
-                "target index =", min(
-                    env.t,
-                    len(agent.expert_qpos) - 1,
-                ),
+
+        mode = agent.tgod_cfg.reward_mode
+
+        if mode == "tcp_tracking":
+            reward = (
+                agent.compute_tcp_tracking_reward(
+                    tcp=info["tcp"],
+                    step=env.t,
+                    action=action,
+                )
             )
 
+        elif mode == "tgod":
+            # 奖励当前动作执行后访问到的新状态
+            reward = agent.compute_pseudo_reward(
+                next_obs,
+                z,
+            )
+
+        else:
+            raise ValueError(
+                f"未知reward_mode：{mode}"
+            )
         if replay is not None:
             replay.add(obs, action, z, reward, next_obs, done)
 
@@ -79,7 +86,23 @@ def rollout_episode(
         qpos_list.append(info["qpos"])
         action_list.append(action)
         reward_list.append(float(reward))
+        cartesian_delta_list.append(
+            info["cartesian_delta"]
+        )
 
+        joint_delta_list.append(
+            info["joint_delta"]
+        )
+
+        q_target_list.append(
+            info["q_target"]
+        )
+
+        jacobian_condition_list.append(
+            float(
+                info["jacobian_condition"]
+            )
+        )
         obs = next_obs
         steps += 1
 
@@ -116,4 +139,23 @@ def rollout_episode(
         ),
         "steps": steps,
         "start_steps_left": start_steps_left,
+        "cartesian_delta": np.asarray(
+            cartesian_delta_list,
+            dtype=np.float32,
+        ),
+
+        "joint_delta": np.asarray(
+            joint_delta_list,
+            dtype=np.float32,
+        ),
+
+        "q_target": np.asarray(
+            q_target_list,
+            dtype=np.float32,
+        ),
+
+        "jacobian_condition": np.asarray(
+            jacobian_condition_list,
+            dtype=np.float32,
+        ),
     }

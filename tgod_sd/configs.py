@@ -8,16 +8,35 @@ class EnvConfig:
     scene_xml: str = "universal_robots_ur5e/scene.xml"
     ur5e_xml: str = "universal_robots_ur5e/ur5e.xml"
 
-    horizon: int = 500
+    # 专家轨迹500帧，对应499次状态转移
+    horizon: int = 499
     frame_skip: int = 5
-    action_scale: float = 0.05
+
+    # joint_delta / cartesian_delta
+    action_mode: str = "cartesian_delta"
+
+    # 旧关节动作模式使用
+    action_scale: float = 0.02
+
+    # 笛卡尔动作模式使用
+    position_action_scale: float = 0.005
+    rotation_action_scale: float = 0.02
+
+    # 阻尼雅可比参数
+    ik_damping: float = 0.03
+    ik_orientation_weight: float = 0.0
+    max_joint_delta: float = 0.02
+    # 单次笛卡尔动作内部最多进行多少次IK迭代
+    ik_max_iterations: int = 20
+    # IK末端位置误差低于该值时停止迭代，单位m
+    ik_position_tolerance: float = 1e-4
+    # 每次IK迭代采用多少比例的关节增量
+    ik_step_gain: float = 0.8
+
     site_name: str = "attachment_site"
     patch_mesh_assets: str = "never"
 
-    # 固定专家起点时必须为0
     reset_noise: float = 0.0
-
-    # 新增：专家初始状态文件
     initial_state_path: str | None = (
         "data/expert_initial_state.npz"
     )
@@ -39,13 +58,20 @@ class SACConfig:
 class TGODConfig:
     z_dim: int = 16
     lr_mine: float = 1e-4
+
+    # tcp_tracking / tgod
+    reward_mode: str = "tcp_tracking"
+
     reward_scale: float = 1.0
     reward_clip: float = 20.0
-    # 工程稳定项：不是论文 TGOD 核心公式。调试时可以给 0.01~0.05。
     anchor_reward_weight: float = 0.0
-    # reward_mode: str = "tracking"
-    reward_mode: str = "joint_tracking"
-    expert_qpos_path: str = "data/expert_qpos.npy"
+
+    # TCP跟踪基准奖励参数
+    position_error_scale: float = 0.05
+    orientation_error_scale: float = 0.20
+    position_reward_weight: float = 1.0
+    orientation_reward_weight: float = 0.5
+    action_penalty_weight: float = 0.01
 
 @dataclass
 class TrainConfig:

@@ -20,12 +20,12 @@ class TGODSDTrainer:
     """训练组织器：只负责把 Env、ReplayBuffer、Agent、Matcher 串起来。"""
 
     def __init__(
-        self,
-        env_cfg: EnvConfig,
-        sac_cfg: SACConfig,
-        tgod_cfg: TGODConfig,
-        train_cfg: TrainConfig,
-        match_cfg: MatchConfig,
+            self,
+            env_cfg: EnvConfig,
+            sac_cfg: SACConfig,
+            tgod_cfg: TGODConfig,
+            train_cfg: TrainConfig,
+            match_cfg: MatchConfig,
     ):
         self.env_cfg = env_cfg
         self.sac_cfg = sac_cfg
@@ -147,6 +147,21 @@ class TGODSDTrainer:
                     "action": episode["action"],
                     "z": episode["z"],
                     "reward_sum": episode["reward_sum"],
+                    "cartesian_delta": episode[
+                        "cartesian_delta"
+                    ],
+
+                    "joint_delta": episode[
+                        "joint_delta"
+                    ],
+
+                    "q_target": episode[
+                        "q_target"
+                    ],
+
+                    "jacobian_condition": episode[
+                        "jacobian_condition"
+                    ],
                 }
         assert best is not None
         return best
@@ -167,6 +182,21 @@ class TGODSDTrainer:
                 dtype=np.float32,
             ),
             expert_demo=self.expert_demo,
+            cartesian_delta=best[
+                "cartesian_delta"
+            ],
+
+            joint_delta=best[
+                "joint_delta"
+            ],
+
+            q_target=best[
+                "q_target"
+            ],
+
+            jacobian_condition=best[
+                "jacobian_condition"
+            ],
         )
         plot_expert_vs_generated(
             expert=self.expert_demo,
@@ -259,8 +289,8 @@ class TGODSDTrainer:
                 "请检查IK、模型或坐标系。"
             )
 
-    @staticmethod
     def _aligned_trajectory(
+            self,
             episode: dict,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -301,4 +331,11 @@ class TGODSDTrainer:
             axis=0,
         )
 
-        return tcp_aligned, qpos_aligned
+        target_length = len(
+            self.expert_demo
+        )
+
+        return (
+            tcp_aligned[:target_length],
+            qpos_aligned[:target_length],
+        )

@@ -59,6 +59,50 @@ def build_parser() -> argparse.ArgumentParser:
         default="joint tracking",
     )
 
+    p.add_argument(
+        "--action_mode",
+        type=str,
+        choices=["joint_delta", "cartesian_delta"],
+        default="cartesian_delta",
+    )
+
+    p.add_argument(
+        "--position_action_scale",
+        type=float,
+        default=0.005,
+    )
+
+    p.add_argument(
+        "--rotation_action_scale",
+        type=float,
+        default=0.02,
+    )
+
+    p.add_argument(
+        "--ik_damping",
+        type=float,
+        default=0.03,
+    )
+
+    p.add_argument(
+        "--ik_orientation_weight",
+        type=float,
+        default=0.3,
+    )
+
+    p.add_argument(
+        "--max_joint_delta",
+        type=float,
+        default=0.02,
+    )
+
+    p.add_argument(
+        "--reward_mode",
+        type=str,
+        choices=["tcp_tracking", "tgod"],
+        default="tcp_tracking",
+    )
+
     # SAC
     p.add_argument("--hidden_dim", type=int, default=256)
     p.add_argument("--gamma", type=float, default=0.99)
@@ -91,7 +135,16 @@ def main() -> None:
         ur5e_xml=args.ur5e_xml,
         horizon=args.horizon,
         frame_skip=args.frame_skip,
+
+        action_mode=args.action_mode,
         action_scale=args.action_scale,
+
+        position_action_scale=args.position_action_scale,
+        rotation_action_scale=args.rotation_action_scale,
+        ik_damping=args.ik_damping,
+        ik_orientation_weight=args.ik_orientation_weight,
+        max_joint_delta=args.max_joint_delta,
+
         site_name=args.site_name,
         patch_mesh_assets=args.patch_mesh_assets,
         reset_noise=args.reset_noise,
@@ -110,6 +163,7 @@ def main() -> None:
     tgod_cfg = TGODConfig(
         z_dim=args.z_dim,
         lr_mine=args.lr_mine,
+        reward_mode=args.reward_mode,
         reward_scale=args.reward_scale,
         reward_clip=args.reward_clip,
         anchor_reward_weight=args.anchor_reward_weight,
