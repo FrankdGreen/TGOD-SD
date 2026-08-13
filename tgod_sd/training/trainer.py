@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import asdict
 from pathlib import Path
 
@@ -38,7 +39,7 @@ class TGODSDTrainer:
         self.expert_demo = load_expert_demo(train_cfg.expert_demo)
 
         self.env = UR5eTGODEnv(env_cfg)
-        self._validate_initial_state(),
+        self._validate_initial_state()
         self.agent = TGODSACAgent(
             obs_dim=self.env.obs_dim,
             action_dim=self.env.action_dim,
@@ -59,6 +60,9 @@ class TGODSDTrainer:
         self._save_config()
         log_path = self.output_dir / "train_log.jsonl"
         start_steps_left = self.train_cfg.start_steps
+        best_eval_rmse = float("inf")
+        best_eval_score = float("inf")
+        best_agent_state: dict | None = None
 
         with log_path.open("w", encoding="utf-8") as f:
             for ep in range(1, self.train_cfg.episodes + 1):
@@ -86,13 +90,54 @@ class TGODSDTrainer:
                             self.train_cfg.batch_size,
                         )
 
+                eval_stats = {}
+                should_eval = (
+                    ep == 1
+                    or ep % self.train_cfg.eval_interval == 0
+                    or ep == self.train_cfg.episodes
+                )
+                if should_eval:
+                    suite = self.evaluate_candidate_suite(
+                        n_candidates=min(
+                            self.match_cfg.n_candidates,
+                            8,
+                        )
+                    )
+                    eval_stats = suite["metrics"]
+                    score = (
+                        eval_stats["eval_best_sinkhorn"]
+                        if self.tgod_cfg.reward_mode == "tgod"
+                        else eval_stats["eval_best_rmse"]
+                    )
+                    if score < best_eval_score:
+                        best_eval_score = float(score)
+                        best_eval_rmse = float(
+                            eval_stats["eval_best_rmse"]
+                        )
+                        best_agent_state = copy.deepcopy(
+                            self.agent.state_dict()
+                        )
+                        self.save_checkpoint(
+                            self.output_dir / "best_sac_checkpoint.pt"
+                        )
+                        np.save(
+                            self.output_dir / "best_eval_tcp.npy",
+                            suite["best_episode"]["tcp"],
+                        )
+
                 record = {
                     "episode": ep,
                     "reward_sum": episode["reward_sum"],
                     "reward_mean": episode["reward_mean"],
+                    "position_rmse": episode["position_rmse"],
+                    "position_mae": episode["position_mae"],
+                    "position_final_error": episode[
+                        "position_final_error"
+                    ],
                     "replay_size": self.replay.size,
                     "start_steps_left": start_steps_left,
                     **stats,
+                    **eval_stats,
                 }
                 f.write(json_dumps(record) + "\n")
                 f.flush()
@@ -101,6 +146,8 @@ class TGODSDTrainer:
                     print(
                         f"[EP {ep:04d}] "
                         f"R={record['reward_sum']:.2f} "
+                        f"rmse={record['position_rmse']:.4f}m "
+                        f"eval_rmse={record.get('eval_best_rmse', float('nan')):.4f}m "
                         f"critic={record.get('critic_loss', 0):.3f} "
                         f"actor={record.get('actor_loss', 0):.3f} "
                         f"mine={record.get('mine_loss', 0):.3f} "
@@ -108,12 +155,98 @@ class TGODSDTrainer:
                     )
 
                 if ep % self.train_cfg.save_interval == 0:
-                    self.save_checkpoint(self.output_dir / "tgod_sd_checkpoint.pt")
+                    self.save_checkpoint(
+                        self.output_dir / "last_sac_checkpoint.pt"
+                    )
                     np.save(self.output_dir / "last_episode_tcp.npy", episode["tcp"])
 
+        self.save_checkpoint(
+            self.output_dir / "last_sac_checkpoint.pt"
+        )
+        if best_agent_state is not None:
+            self.agent.load_state_dict(best_agent_state)
         self.save_checkpoint(self.output_dir / "tgod_sd_checkpoint.pt")
         best = self.match_best_trajectory()
         self._save_best(best)
+
+    def _evaluation_latents(self, n_candidates: int) -> np.ndarray:
+        if self.tgod_cfg.reward_mode == "tcp_tracking":
+            return np.zeros(
+                (max(2, int(n_candidates)), self.tgod_cfg.z_dim),
+                dtype=np.float32,
+            )
+        rng = np.random.default_rng(self.train_cfg.seed + 2025)
+        return rng.standard_normal(
+            (max(2, int(n_candidates)), self.tgod_cfg.z_dim)
+        ).astype(np.float32)
+
+    def evaluate_candidate_suite(self, n_candidates: int) -> dict:
+        episodes: list[dict] = []
+        trajectories: list[np.ndarray] = []
+        rmses: list[float] = []
+        sinkhorn_values: list[float] = []
+        expert = self.expert_demo[: self.env.horizon + 1]
+
+        for latent in self._evaluation_latents(n_candidates):
+            episode = rollout_episode(
+                self.env,
+                self.agent,
+                replay=None,
+                deterministic=True,
+                latent=latent,
+            )
+            tcp, _ = self._aligned_trajectory(episode)
+            target = expert[: len(tcp)]
+            error = np.linalg.norm(
+                tcp[:, :3] - target[:, :3],
+                axis=1,
+            )
+            episodes.append(episode)
+            trajectories.append(tcp)
+            rmses.append(float(np.sqrt(np.mean(error**2))))
+            sinkhorn_values.append(
+                sinkhorn_distance(
+                    tcp,
+                    target,
+                    epsilon=self.match_cfg.sinkhorn_epsilon,
+                    n_iters=self.match_cfg.sinkhorn_iters,
+                    standardize=True,
+                )
+            )
+
+        pairwise: list[float] = []
+        endpoint_pairwise: list[float] = []
+        for i in range(len(trajectories)):
+            for j in range(i + 1, len(trajectories)):
+                delta = trajectories[i][:, :3] - trajectories[j][:, :3]
+                pairwise.append(
+                    float(np.sqrt(np.mean(np.sum(delta**2, axis=1))))
+                )
+                endpoint_pairwise.append(
+                    float(np.linalg.norm(delta[-1]))
+                )
+
+        best_index = int(np.argmin(sinkhorn_values))
+        metrics = {
+            "eval_best_rmse": float(np.min(rmses)),
+            "eval_mean_rmse": float(np.mean(rmses)),
+            "eval_std_rmse": float(np.std(rmses)),
+            "eval_best_sinkhorn": float(np.min(sinkhorn_values)),
+            "eval_mean_sinkhorn": float(np.mean(sinkhorn_values)),
+            "eval_trajectory_diversity": float(np.mean(pairwise)) if pairwise else 0.0,
+            "eval_endpoint_diversity": float(np.mean(endpoint_pairwise)) if endpoint_pairwise else 0.0,
+        }
+        return {
+            "metrics": metrics,
+            "best_episode": episodes[best_index],
+            "trajectories": np.asarray(trajectories, dtype=np.float32),
+            "rmses": np.asarray(rmses, dtype=np.float32),
+            "sinkhorn_values": np.asarray(
+                sinkhorn_values,
+                dtype=np.float32,
+            ),
+            "latents": self._evaluation_latents(n_candidates),
+        }
 
     def match_best_trajectory(self) -> dict:
         best: dict | None = None
@@ -128,9 +261,10 @@ class TGODSDTrainer:
             tcp, qpos = self._aligned_trajectory(
                 episode
             )
+            expert_for_match = self.expert_demo[: len(tcp)]
             dist = sinkhorn_distance(
                 tcp,
-                self.expert_demo,
+                expert_for_match,
                 epsilon=self.match_cfg.sinkhorn_epsilon,
                 n_iters=self.match_cfg.sinkhorn_iters,
                 standardize=True,
@@ -181,7 +315,7 @@ class TGODSDTrainer:
                 best["sinkhorn_distance"],
                 dtype=np.float32,
             ),
-            expert_demo=self.expert_demo,
+            expert_demo=self.expert_demo[: len(best["tcp"])],
             cartesian_delta=best[
                 "cartesian_delta"
             ],
@@ -199,7 +333,7 @@ class TGODSDTrainer:
             ],
         )
         plot_expert_vs_generated(
-            expert=self.expert_demo,
+            expert=self.expert_demo[: len(best["tcp"])],
             generated=best["tcp"],
             output_path=self.output_dir / "expert_vs_tgod_sd_tcp.png",
         )
@@ -315,7 +449,7 @@ class TGODSDTrainer:
                     episode["initial_tcp"],
                     dtype=np.float32,
                 )[None, :],
-                tcp_after[:-1],
+                tcp_after,
             ],
             axis=0,
         )
@@ -326,7 +460,7 @@ class TGODSDTrainer:
                     episode["initial_qpos"],
                     dtype=np.float32,
                 )[None, :],
-                qpos_after[:-1],
+                qpos_after,
             ],
             axis=0,
         )

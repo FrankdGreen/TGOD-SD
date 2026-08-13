@@ -10,7 +10,7 @@ class EnvConfig:
 
     # 专家轨迹500帧，对应499次状态转移
     horizon: int = 499
-    frame_skip: int = 5
+    frame_skip: int = 20
 
     # joint_delta / cartesian_delta
     action_mode: str = "cartesian_delta"
@@ -19,7 +19,7 @@ class EnvConfig:
     action_scale: float = 0.02
 
     # 笛卡尔动作模式使用
-    position_action_scale: float = 0.005
+    position_action_scale: float = 0.015
     rotation_action_scale: float = 0.02
 
     # 阻尼雅可比参数
@@ -33,6 +33,11 @@ class EnvConfig:
     # 每次IK迭代采用多少比例的关节增量
     ik_step_gain: float = 0.8
 
+    # 防止增量动作连续累积后，控制参考远离机器人实际状态。
+    max_tcp_reference_error: float = 0.08
+    max_joint_target_error: float = 0.18
+    tracking_error_scale: float = 0.05
+
     site_name: str = "attachment_site"
     patch_mesh_assets: str = "never"
 
@@ -40,38 +45,41 @@ class EnvConfig:
     initial_state_path: str | None = (
         "data/expert_initial_state.npz"
     )
+    position_only: bool = True
 
 
 @dataclass
 class SACConfig:
     hidden_dim: int = 256
-    gamma: float = 0.99
+    gamma: float = 0.98
     tau: float = 0.005
     lr_actor: float = 3e-4
     lr_critic: float = 3e-4
     lr_alpha: float = 3e-4
-    alpha_init: float = 0.2
+    alpha_init: float = 0.05
     target_entropy: float | None = None
 
 
 @dataclass
 class TGODConfig:
-    z_dim: int = 16
+    z_dim: int = 4
     lr_mine: float = 1e-4
 
     # tcp_tracking / tgod
     reward_mode: str = "tcp_tracking"
 
     reward_scale: float = 1.0
-    reward_clip: float = 20.0
+    reward_clip: float = 2.0
     anchor_reward_weight: float = 0.0
+    mine_zs_weight: float = 1.0
+    mine_zd_weight: float = 1.0
 
     # TCP跟踪基准奖励参数
-    position_error_scale: float = 0.05
+    position_error_scale: float = 0.10
     orientation_error_scale: float = 0.20
     position_reward_weight: float = 1.0
-    orientation_reward_weight: float = 0.5
-    action_penalty_weight: float = 0.01
+    orientation_reward_weight: float = 0.0
+    action_penalty_weight: float = 0.001
 
 @dataclass
 class TrainConfig:
@@ -91,6 +99,7 @@ class TrainConfig:
     learning_starts: int = 2500
 
     log_interval: int = 10
+    eval_interval: int = 10
     save_interval: int = 100
     device: str = "auto"
     fixed_z: bool = False

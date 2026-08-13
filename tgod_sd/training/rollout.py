@@ -16,10 +16,17 @@ def rollout_episode(
     start_steps_left: int = 0,
     deterministic: bool = False,
     fixed_z: bool = False,
+    latent: np.ndarray | None = None,
 ) -> dict[str, np.ndarray | float | int]:
     """跑一个 episode。训练时传 replay；评估/匹配时 replay=None。"""
     obs = env.reset()
-    if fixed_z:
+    # 普通TCP跟踪基线不学习多样性，固定z可消除无意义的条件噪声。
+    fixed_z = fixed_z or agent.tgod_cfg.reward_mode == "tcp_tracking"
+    if latent is not None:
+        z = np.asarray(latent, dtype=np.float32).reshape(
+            agent.z_dim
+        )
+    elif fixed_z:
         z = np.zeros(
             agent.z_dim,
             dtype=np.float32,
@@ -35,6 +42,14 @@ def rollout_episode(
         np.float32
     )
 
+    # 公平比较：SAC和TGOD都接收相同的专家目标观测，二者只在
+    # 奖励来源和MINE更新上存在差异。
+    first_target_index = min(1, len(agent.expert_demo) - 1)
+    obs = env.set_tracking_target(
+        agent.expert_demo[first_target_index, :3]
+    )
+    initial_obs = obs.copy()
+
     tcp_list: list[np.ndarray] = []
     qpos_list: list[np.ndarray] = []
     action_list: list[np.ndarray] = []
@@ -43,6 +58,7 @@ def rollout_episode(
     joint_delta_list: list[np.ndarray] = []
     q_target_list: list[np.ndarray] = []
     jacobian_condition_list: list[float] = []
+    position_error_list: list[float] = []
 
     done = False
     steps = 0
@@ -60,11 +76,23 @@ def rollout_episode(
         mode = agent.tgod_cfg.reward_mode
 
         if mode == "tcp_tracking":
+            target_index = min(
+                env.t,
+                len(agent.expert_demo) - 1,
+            )
             reward = (
                 agent.compute_tcp_tracking_reward(
                     tcp=info["tcp"],
                     step=env.t,
                     action=action,
+                )
+            )
+            position_error_list.append(
+                float(
+                    np.linalg.norm(
+                        np.asarray(info["tcp"][:3])
+                        - agent.expert_demo[target_index, :3]
+                    )
                 )
             )
 
@@ -78,6 +106,30 @@ def rollout_episode(
         else:
             raise ValueError(
                 f"未知reward_mode：{mode}"
+            )
+
+        if mode == "tgod":
+            target_index = min(
+                env.t,
+                len(agent.expert_demo) - 1,
+            )
+            position_error_list.append(
+                float(
+                    np.linalg.norm(
+                        np.asarray(info["tcp"][:3])
+                        - agent.expert_demo[target_index, :3]
+                    )
+                )
+            )
+
+        # ReplayBuffer中的next_obs必须包含下一步真正要跟踪的目标。
+        if not done:
+            next_target_index = min(
+                env.t + 1,
+                len(agent.expert_demo) - 1,
+            )
+            next_obs = env.set_tracking_target(
+                agent.expert_demo[next_target_index, :3]
             )
         if replay is not None:
             replay.add(obs, action, z, reward, next_obs, done)
@@ -135,6 +187,27 @@ def rollout_episode(
         "reward_mean": (
             float(np.mean(reward_list))
             if reward_list
+            else 0.0
+        ),
+        "position_rmse": (
+            float(
+                np.sqrt(
+                    np.mean(
+                        np.square(position_error_list)
+                    )
+                )
+            )
+            if position_error_list
+            else 0.0
+        ),
+        "position_mae": (
+            float(np.mean(position_error_list))
+            if position_error_list
+            else 0.0
+        ),
+        "position_final_error": (
+            float(position_error_list[-1])
+            if position_error_list
             else 0.0
         ),
         "steps": steps,

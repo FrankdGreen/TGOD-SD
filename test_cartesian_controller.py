@@ -92,13 +92,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--frame_skip",
         type=int,
-        default=5,
+        default=20,
     )
 
     parser.add_argument(
         "--position_action_scale",
         type=float,
-        default=0.005,
+        default=0.015,
         help="Actor归一化动作1.0对应的最大单步位置增量，单位m。",
     )
 
@@ -345,11 +345,15 @@ def main() -> None:
                         / args.rotation_action_scale
                 )
 
-            action = np.concatenate(
-                [
-                    position_action,
-                    orientation_action,
-                ]
+            action = (
+                position_action
+                if env.action_dim == 3
+                else np.concatenate(
+                    [
+                        position_action,
+                        orientation_action,
+                    ]
+                )
             )
 
             action = np.clip(

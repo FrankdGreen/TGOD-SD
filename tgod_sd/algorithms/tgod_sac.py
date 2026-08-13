@@ -37,8 +37,10 @@ class TGODSACAgent(SACAgent):
         self.tgod_cfg = tgod_cfg
         self.tcp_slice = tcp_slice
 
-        self.mine_zs = MINENet(obs_dim, tgod_cfg.z_dim, sac_cfg.hidden_dim).to(self.device)
-        self.mine_zd = MINENet(12, tgod_cfg.z_dim, sac_cfg.hidden_dim).to(self.device)
+        self.mine_zs = MINENet(13, tgod_cfg.z_dim, sac_cfg.hidden_dim).to(self.device)
+        # D只有一条固定示范时，I(Z;D)本身退化为0。这里使用论文
+        # “围绕示范生成”的可计算形式：当前TCP、同相位专家TCP和残差。
+        self.mine_zd = MINENet(9, tgod_cfg.z_dim, sac_cfg.hidden_dim).to(self.device)
         self.mine_opt = torch.optim.Adam(
             list(self.mine_zs.parameters()) + list(self.mine_zd.parameters()),
             lr=tgod_cfg.lr_mine,
@@ -89,9 +91,18 @@ class TGODSACAgent(SACAgent):
 
         if mode == "tgod":
             mine_stats = self._update_mine(
-                batch["obs"],
+                batch["next_obs"],
                 batch["z"],
             )
+
+            with torch.no_grad():
+                pseudo_reward, reward_stats = (
+                    self._pseudo_reward_batch(
+                        batch["next_obs"],
+                        batch["z"],
+                    )
+                )
+            batch["reward"] = pseudo_reward
 
             sac_stats = self.update_sac(
                 batch
@@ -100,6 +111,7 @@ class TGODSACAgent(SACAgent):
             return {
                 **sac_stats,
                 **mine_stats,
+                **reward_stats,
             }
 
         raise ValueError(
@@ -107,12 +119,19 @@ class TGODSACAgent(SACAgent):
         )
 
     def _update_mine(self, obs: torch.Tensor, z: torch.Tensor) -> dict[str, float]:
-        batch_size = obs.shape[0]
-        expert = self._sample_expert_torch(batch_size)
-
-        mi_zs = self.mine_zs.mi_lower_bound(obs, z)
-        mi_zd = self.mine_zd.mi_lower_bound(expert, z)
-        mine_loss = -(mi_zs + mi_zd)
+        mi_zs = self.mine_zs.mi_lower_bound(
+            self._state_condition(obs),
+            z,
+        )
+        demo_condition = self._demo_condition(obs)
+        mi_zd = self.mine_zd.mi_lower_bound(
+            demo_condition,
+            z,
+        )
+        mine_loss = -(
+            self.tgod_cfg.mine_zs_weight * mi_zs
+            + self.tgod_cfg.mine_zd_weight * mi_zd
+        )
 
         self.mine_opt.zero_grad(set_to_none=True)
         mine_loss.backward()
@@ -128,9 +147,16 @@ class TGODSACAgent(SACAgent):
     def compute_pseudo_reward(self, obs: np.ndarray, z: np.ndarray) -> float:
         obs_t = torch.as_tensor(obs[None], device=self.device, dtype=torch.float32)
         z_t = torch.as_tensor(z[None], device=self.device, dtype=torch.float32)
-        expert_t = self._sample_expert_torch(1)
-
-        r_tgod = self.mine_zs.score(obs_t, z_t) + self.mine_zd.score(expert_t, z_t)
+        demo_condition = self._demo_condition(obs_t)
+        r_tgod = (
+            self.tgod_cfg.mine_zs_weight
+            * self.mine_zs.score(
+                self._state_condition(obs_t),
+                z_t,
+            )
+            + self.tgod_cfg.mine_zd_weight
+            * self.mine_zd.score(demo_condition, z_t)
+        )
         r = r_tgod.item()
 
         if self.tgod_cfg.anchor_reward_weight > 0:
@@ -139,6 +165,102 @@ class TGODSACAgent(SACAgent):
 
         r *= self.tgod_cfg.reward_scale
         return float(np.clip(r, -self.tgod_cfg.reward_clip, self.tgod_cfg.reward_clip))
+
+    def _demo_condition(self, obs: torch.Tensor) -> torch.Tensor:
+        tcp_xyz = obs[:, self.tcp_slice.start:self.tcp_slice.start + 3]
+        phase = torch.clamp(obs[:, -1], 0.0, 1.0)
+        index = torch.round(
+            phase * float(len(self.expert_demo) - 1)
+        ).long()
+        expert_xyz = self.expert_tensor[index, :3]
+        mean = torch.as_tensor(
+            self.expert_mean[0, :3],
+            device=self.device,
+        )
+        std = torch.as_tensor(
+            self.expert_std[0, :3],
+            device=self.device,
+        )
+        current_norm = (tcp_xyz - mean) / std
+        expert_norm = (expert_xyz - mean) / std
+        error_norm = (
+            tcp_xyz - expert_xyz
+        ) / max(float(self.tgod_cfg.position_error_scale), 1e-6)
+        return torch.cat(
+            [current_norm, expert_norm, error_norm],
+            dim=-1,
+        )
+
+    def _state_condition(self, obs: torch.Tensor) -> torch.Tensor:
+        tcp = obs[:, self.tcp_slice]
+        mean = torch.as_tensor(
+            self.expert_mean[0],
+            device=self.device,
+        )
+        std = torch.as_tensor(
+            np.maximum(self.expert_std[0], 1e-3),
+            device=self.device,
+        )
+        tcp_norm = torch.clamp(
+            (tcp - mean) / std,
+            -10.0,
+            10.0,
+        )
+        return torch.cat(
+            [tcp_norm, obs[:, -1:]],
+            dim=-1,
+        )
+
+    def _pseudo_reward_batch(
+        self,
+        obs: torch.Tensor,
+        z: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """用当前MINE计算逐样本DV密度比，避免经验池中的旧伪奖励。"""
+        demo_condition = self._demo_condition(obs)
+        shuffled_z = z[torch.randperm(z.shape[0], device=z.device)]
+
+        state_condition = self._state_condition(obs)
+        joint_zs = self.mine_zs.score(state_condition, z)
+        marginal_zs = self.mine_zs.score(
+            state_condition,
+            shuffled_z,
+        )
+        joint_zd = self.mine_zd.score(demo_condition, z)
+        marginal_zd = self.mine_zd.score(
+            demo_condition,
+            shuffled_z,
+        )
+
+        log_partition_zs = torch.logsumexp(
+            marginal_zs,
+            dim=0,
+            keepdim=True,
+        ) - np.log(float(z.shape[0]))
+        log_partition_zd = torch.logsumexp(
+            marginal_zd,
+            dim=0,
+            keepdim=True,
+        ) - np.log(float(z.shape[0]))
+
+        reward_zs = joint_zs - log_partition_zs
+        reward_zd = joint_zd - log_partition_zd
+        reward = self.tgod_cfg.reward_scale * (
+            self.tgod_cfg.mine_zs_weight * reward_zs
+            + self.tgod_cfg.mine_zd_weight * reward_zd
+        )
+        reward = torch.clamp(
+            reward,
+            -self.tgod_cfg.reward_clip,
+            self.tgod_cfg.reward_clip,
+        )
+        stats = {
+            "pseudo_reward_mean": float(reward.mean().cpu()),
+            "pseudo_reward_std": float(reward.std(unbiased=False).cpu()),
+            "reward_zs_mean": float(reward_zs.mean().cpu()),
+            "reward_zd_mean": float(reward_zd.mean().cpu()),
+        }
+        return reward, stats
 
     def _sample_expert_torch(self, batch_size: int) -> torch.Tensor:
         idx = torch.randint(0, self.expert_tensor.shape[0], (batch_size,), device=self.device)
@@ -254,53 +376,30 @@ class TGODSACAgent(SACAgent):
         )
 
     def compute_tcp_tracking_reward(
-            self,
-            tcp: np.ndarray,
-            step: int,
-            action: np.ndarray,
+        self,
+        tcp: np.ndarray,
+        step: int,
+        action: np.ndarray,
     ) -> float:
         index = min(
             max(int(step), 0),
             len(self.expert_demo) - 1,
         )
 
-        target = self.expert_demo[index]
-
-        position_error = (
-                tcp[:3]
-                - target[:3]
+        current_position = np.asarray(
+            tcp[:3],
+            dtype=np.float32,
         )
 
-        orientation_error = (
-            rotation_error_rotvec(
-                current_rotvec=tcp[3:6],
-                target_rotvec=target[3:6],
-            )
-        )
+        target_position = self.expert_demo[
+            index,
+            :3,
+        ]
 
-        position_scale = (
-            self.tgod_cfg.position_error_scale
-        )
-
-        orientation_scale = (
-            self.tgod_cfg.orientation_error_scale
-        )
-
-        position_cost = float(
-            np.sum(
-                (
-                        position_error
-                        / position_scale
-                ) ** 2
-            )
-        )
-
-        orientation_cost = float(
-            np.sum(
-                (
-                        orientation_error
-                        / orientation_scale
-                ) ** 2
+        position_distance = float(
+            np.linalg.norm(
+                current_position
+                - target_position
             )
         )
 
@@ -313,21 +412,25 @@ class TGODSACAgent(SACAgent):
             )
         )
 
+        position_scale = max(
+            float(self.tgod_cfg.position_error_scale),
+            1e-6,
+        )
+
+        # 使用可配置的无量纲距离。5 cm误差在默认配置下对应-1，
+        # 同时保留很小的动作正则项。
         reward = (
-                -self.tgod_cfg.position_reward_weight
-                * position_cost
-
-                - self.tgod_cfg.orientation_reward_weight
-                * orientation_cost
-
-                - self.tgod_cfg.action_penalty_weight
-                * action_cost
+            -self.tgod_cfg.position_reward_weight
+            * position_distance
+            / position_scale
+            -self.tgod_cfg.action_penalty_weight
+            * action_cost
         )
 
         return float(
             np.clip(
                 reward,
                 -self.tgod_cfg.reward_clip,
-                5.0,
+                0.0,
             )
         )

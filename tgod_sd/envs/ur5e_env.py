@@ -69,6 +69,16 @@ class UR5eTGODEnv:
         self.ik_step_gain = float(
             cfg.ik_step_gain
         )
+        self.max_tcp_reference_error = float(
+            cfg.max_tcp_reference_error
+        )
+        self.max_joint_target_error = float(
+            cfg.max_joint_target_error
+        )
+        self.tracking_error_scale = max(
+            float(cfg.tracking_error_scale),
+            1e-6,
+        )
         self.reset_noise = float(cfg.reset_noise)
         self.t = 0
         self._runtime_tmp: Optional[tempfile.TemporaryDirectory] = None
@@ -76,6 +86,7 @@ class UR5eTGODEnv:
         # 不能在每一步重新用实际qpos或实际TCP覆盖。
         self.q_reference: np.ndarray | None = None
         self.tcp_reference: np.ndarray | None = None
+        self.tracking_target_xyz: np.ndarray | None = None
 
         self.model, self.data = self._load_model(
             scene_xml=cfg.scene_xml,
@@ -136,7 +147,7 @@ class UR5eTGODEnv:
         obs = self.reset()
         self.obs_dim = int(obs.shape[0])
         if self.action_mode == "cartesian_delta":
-            self.action_dim = 6
+            self.action_dim = 3
         else:
             self.action_dim = self.nu
         self.tcp_dim = 12
@@ -295,6 +306,10 @@ class UR5eTGODEnv:
             current_tcp[:6],
             dtype=np.float64,
         ).copy()
+        self.tracking_target_xyz = np.asarray(
+            current_tcp[:3],
+            dtype=np.float64,
+        ).copy()
 
         # 再更新一次，确保ctrl和状态一致
         self.mujoco.mj_forward(
@@ -424,6 +439,30 @@ class UR5eTGODEnv:
 
             )
 
+            # 增量参考只能在实际TCP附近有限范围内移动，避免随机探索
+            # 将持久参考持续推向不可达位置。
+            actual_position = self.tcp_feature()[:3].astype(
+                np.float64
+            )
+            reference_offset = (
+                self.tcp_reference[:3] - actual_position
+            )
+            reference_distance = float(
+                np.linalg.norm(reference_offset)
+            )
+            if (
+                self.max_tcp_reference_error > 0
+                and reference_distance > self.max_tcp_reference_error
+            ):
+                self.tcp_reference[:3] = (
+                    actual_position
+                    + reference_offset
+                    * (
+                        self.max_tcp_reference_error
+                        / reference_distance
+                    )
+                )
+
             target_position = (
 
                 self.tcp_reference[:3].copy()
@@ -505,6 +544,15 @@ class UR5eTGODEnv:
                 self.ctrl_high,
 
             )
+
+            # IK内部步长限制不等于最终伺服目标限制。这里再限制目标
+            # 相对实际关节角的误差，避免一次下发过远的关节目标。
+            if self.max_joint_target_error > 0:
+                q_target = np.clip(
+                    q_target,
+                    q_current - self.max_joint_target_error,
+                    q_current + self.max_joint_target_error,
+                )
 
             # ---------------------------------------
 
@@ -640,6 +688,14 @@ class UR5eTGODEnv:
 
         return obs, 0.0, done, info
 
+    def set_tracking_target(self, target_xyz: np.ndarray) -> np.ndarray:
+        """设置下一次动作要跟踪的专家位置，并返回更新后的观测。"""
+        self.tracking_target_xyz = np.asarray(
+            target_xyz,
+            dtype=np.float64,
+        ).reshape(3).copy()
+        return self._get_obs()
+
     def _site_velocity(self) -> np.ndarray:
         res = np.zeros(6, dtype=np.float64)
         try:
@@ -665,10 +721,6 @@ class UR5eTGODEnv:
         return np.concatenate([pos, rotvec, vel]).astype(np.float32)
 
     def _get_obs(self) -> np.ndarray:
-        # qpos = np.asarray(self.data.qpos, dtype=np.float32).reshape(-1)
-        # qvel = np.asarray(self.data.qvel, dtype=np.float32).reshape(-1)
-        # tcp = self.tcp_feature()
-        # return np.concatenate([qpos, qvel, tcp]).astype(np.float32)
         qpos = np.asarray(
             self.data.qpos,
             dtype=np.float32,
@@ -680,6 +732,41 @@ class UR5eTGODEnv:
         ).reshape(-1)
 
         tcp = self.tcp_feature()
+
+        q_reference = (
+            np.asarray(
+                self.q_reference,
+                dtype=np.float32,
+            )
+            if self.q_reference is not None
+            else qpos[self.qpos_ids].copy()
+        )
+
+        tcp_reference_xyz = (
+            np.asarray(
+                self.tcp_reference[:3],
+                dtype=np.float32,
+            )
+            if self.tcp_reference is not None
+            else tcp[:3].copy()
+        )
+
+        reference_error = (
+                tcp_reference_xyz
+                - tcp[:3]
+        )
+
+        tracking_target_xyz = (
+            np.asarray(
+                self.tracking_target_xyz,
+                dtype=np.float32,
+            )
+            if self.tracking_target_xyz is not None
+            else tcp[:3].copy()
+        )
+        tracking_error = (
+            tracking_target_xyz - tcp[:3]
+        ) / self.tracking_error_scale
 
         phase = np.array(
             [
@@ -693,5 +780,15 @@ class UR5eTGODEnv:
         )
 
         return np.concatenate(
-            [qpos, qvel, tcp, phase]
+            [
+                qpos,
+                qvel,
+                tcp,
+                q_reference,
+                tcp_reference_xyz,
+                reference_error,
+                tracking_target_xyz,
+                tracking_error,
+                phase,
+            ]
         ).astype(np.float32)

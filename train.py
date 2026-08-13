@@ -18,12 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", type=str, default="auto")
 
     # env
-    p.add_argument("--horizon", type=int, default=500)
-    p.add_argument("--frame_skip", type=int, default=5)
-    p.add_argument("--action_scale", type=float, default=0.05)
+    p.add_argument("--horizon", type=int, default=499)
+    p.add_argument("--frame_skip", type=int, default=20)
+    p.add_argument("--action_scale", type=float, default=0.02)
     p.add_argument("--site_name", type=str, default="attachment_site")
     p.add_argument("--patch_mesh_assets", type=str, default="auto", choices=["auto", "always", "never"])
-    p.add_argument("--reset_noise", type=float, default=0.01)
+    p.add_argument("--reset_noise", type=float, default=0.00)
     p.add_argument("--initial_state_path", type=str, default="data/expert_initial_state.npz", help="每个episode共同使用的专家初始状态。")
 
     # train
@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--replay_size", type=int, default=1_000_000)
     p.add_argument("--log_interval", type=int, default=10)
+    p.add_argument("--eval_interval", type=int, default=10)
     p.add_argument("--save_interval", type=int, default=100)
     p.add_argument(
         "--start_steps",
@@ -53,11 +54,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="所有episode固定使用零向量z，用于纯轨迹跟踪基准。",
     )
-    p.add_argument(
-        "--reward_mode",
-        type=str,
-        default="joint tracking",
-    )
 
     p.add_argument(
         "--action_mode",
@@ -69,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--position_action_scale",
         type=float,
-        default=0.005,
+        default=0.015,
     )
 
     p.add_argument(
@@ -102,22 +98,33 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["tcp_tracking", "tgod"],
         default="tcp_tracking",
     )
+    p.add_argument("--ik_max_iterations", type=int, default=20)
+    p.add_argument("--ik_position_tolerance", type=float, default=1e-4)
+    p.add_argument("--ik_step_gain", type=float, default=0.8)
+    p.add_argument("--max_tcp_reference_error", type=float, default=0.08)
+    p.add_argument("--max_joint_target_error", type=float, default=0.18)
+    p.add_argument("--tracking_error_scale", type=float, default=0.05)
 
     # SAC
     p.add_argument("--hidden_dim", type=int, default=256)
-    p.add_argument("--gamma", type=float, default=0.99)
+    p.add_argument("--gamma", type=float, default=0.98)
     p.add_argument("--tau", type=float, default=0.005)
     p.add_argument("--lr_actor", type=float, default=3e-4)
     p.add_argument("--lr_critic", type=float, default=3e-4)
     p.add_argument("--lr_alpha", type=float, default=3e-4)
-    p.add_argument("--alpha_init", type=float, default=0.2)
+    p.add_argument("--alpha_init", type=float, default=0.02)
+    p.add_argument("--target_entropy", type=float, default=None)
 
     # TGOD / MINE
     p.add_argument("--z_dim", type=int, default=16)
     p.add_argument("--lr_mine", type=float, default=1e-4)
     p.add_argument("--reward_scale", type=float, default=1.0)
-    p.add_argument("--reward_clip", type=float, default=20.0)
-    p.add_argument("--anchor_reward_weight", type=float, default=0.05)
+    p.add_argument("--reward_clip", type=float, default=2.0)
+    p.add_argument("--anchor_reward_weight", type=float, default=0.0)
+    p.add_argument("--mine_zs_weight", type=float, default=1.0)
+    p.add_argument("--mine_zd_weight", type=float, default=1.0)
+    p.add_argument("--position_error_scale", type=float, default=0.10)
+    p.add_argument("--action_penalty_weight", type=float, default=0.001)
 
     # matching
     p.add_argument("--n_candidates", type=int, default=20)
@@ -144,6 +151,12 @@ def main() -> None:
         ik_damping=args.ik_damping,
         ik_orientation_weight=args.ik_orientation_weight,
         max_joint_delta=args.max_joint_delta,
+        ik_max_iterations=args.ik_max_iterations,
+        ik_position_tolerance=args.ik_position_tolerance,
+        ik_step_gain=args.ik_step_gain,
+        max_tcp_reference_error=args.max_tcp_reference_error,
+        max_joint_target_error=args.max_joint_target_error,
+        tracking_error_scale=args.tracking_error_scale,
 
         site_name=args.site_name,
         patch_mesh_assets=args.patch_mesh_assets,
@@ -159,6 +172,7 @@ def main() -> None:
         lr_critic=args.lr_critic,
         lr_alpha=args.lr_alpha,
         alpha_init=args.alpha_init,
+        target_entropy=args.target_entropy,
     )
     tgod_cfg = TGODConfig(
         z_dim=args.z_dim,
@@ -167,6 +181,10 @@ def main() -> None:
         reward_scale=args.reward_scale,
         reward_clip=args.reward_clip,
         anchor_reward_weight=args.anchor_reward_weight,
+        mine_zs_weight=args.mine_zs_weight,
+        mine_zd_weight=args.mine_zd_weight,
+        position_error_scale=args.position_error_scale,
+        action_penalty_weight=args.action_penalty_weight,
     )
     train_cfg = TrainConfig(
         expert_demo=args.expert_demo,
@@ -178,6 +196,7 @@ def main() -> None:
         replay_size=args.replay_size,
         start_steps=args.start_steps,
         log_interval=args.log_interval,
+        eval_interval=args.eval_interval,
         save_interval=args.save_interval,
         device=args.device,
         learning_starts=args.learning_starts,

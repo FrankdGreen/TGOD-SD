@@ -45,7 +45,7 @@ def main() -> None:
 
         # 只给Z方向一个+1动作
         action = np.array(
-            [0, 0, 1, 0, 0, 0],
+            [0, 0, 1],
             dtype=np.float32,
         )
 
@@ -77,7 +77,7 @@ def main() -> None:
 
         # 后续零动作不应继续改变参考
         zero_action = np.zeros(
-            6,
+            env.action_dim,
             dtype=np.float32,
         )
 

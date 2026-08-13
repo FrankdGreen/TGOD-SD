@@ -99,7 +99,9 @@ def solve_position_target_iterative(
     )
 
     final_error = float("inf")
-    condition_number = float("inf")
+    # 若初始解已经满足容差，不会计算雅可比；此时用0表示
+    # “无需求解”，避免诊断输出出现无意义的inf。
+    condition_number = 0.0
     iterations_used = 0
 
     for iteration in range(
